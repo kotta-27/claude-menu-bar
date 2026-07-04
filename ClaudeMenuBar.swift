@@ -40,11 +40,18 @@ struct UsageEntry {
     let label: String
     let pct: Int
     let resetsAt: Date?
+    let resetsAtRaw: String?
 }
 
 struct UsageData {
     let session: UsageEntry
     let weekly: [UsageEntry]
+}
+
+struct HistoryEntry: Codable {
+    let t: Double   // Unix timestamp
+    let s: Int      // sessionPct
+    let r: String   // resetsAt ISO (session identifier)
 }
 
 struct ModelInfo {
@@ -102,19 +109,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let weeklyLimits = resp.limits.filter { $0.group == "weekly" }
 
                 let session = UsageEntry(
-                    label:    "5h セッション",
-                    pct:      sessionLimit?.percent ?? 0,
-                    resetsAt: date(sessionLimit?.resetsAt)
+                    label:       "5h セッション",
+                    pct:         sessionLimit?.percent ?? 0,
+                    resetsAt:    date(sessionLimit?.resetsAt),
+                    resetsAtRaw: sessionLimit?.resetsAt
                 )
                 let weekly = weeklyLimits.map { l -> UsageEntry in
                     let name = l.scope?.model?.displayName ?? "週間"
                     let label = name == "週間" ? "週間" : "週間 \(name)"
-                    return UsageEntry(label: label, pct: l.percent, resetsAt: date(l.resetsAt))
+                    return UsageEntry(label: label, pct: l.percent, resetsAt: date(l.resetsAt), resetsAtRaw: l.resetsAt)
                 }
                 let parsed = UsageData(session: session, weekly: weekly)
                 DispatchQueue.main.async {
                     self?.checkUsageThresholds(newPct: parsed.session.pct)
                     self?.usage = parsed
+                    if let r = parsed.session.resetsAtRaw {
+                        self?.appendHistory(sessionPct: parsed.session.pct, resetsAt: r)
+                    }
                     self?.refresh()
                 }
             }.resume()
@@ -256,6 +267,57 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case "Free": return 1
         default:     return 0
         }
+    }
+
+    // MARK: - History
+
+    var historyFileURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/cmb-history.jsonl")
+    }
+
+    func appendHistory(sessionPct: Int, resetsAt: String) {
+        let entry = HistoryEntry(t: Date().timeIntervalSince1970, s: sessionPct, r: resetsAt)
+        guard let data = try? JSONEncoder().encode(entry),
+              let line = String(data: data, encoding: .utf8) else { return }
+        let url = historyFileURL
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write((line + "\n").data(using: .utf8)!)
+            try? handle.close()
+        } else {
+            try? (line + "\n").write(to: url, atomically: true, encoding: .utf8)
+        }
+        pruneHistory()
+    }
+
+    func pruneHistory() {
+        guard let content = try? String(contentsOf: historyFileURL, encoding: .utf8) else { return }
+        let lines = content.components(separatedBy: "\n").filter { !$0.isEmpty }
+        if lines.count > 500 {
+            let trimmed = lines.suffix(400).joined(separator: "\n") + "\n"
+            try? trimmed.write(to: historyFileURL, atomically: true, encoding: .utf8)
+        }
+    }
+
+    func loadSessionPeaks(last n: Int = 10) -> [Int] {
+        guard let content = try? String(contentsOf: historyFileURL, encoding: .utf8) else { return [] }
+        var peaks: [String: Int] = [:]
+        var order: [String] = []
+        for line in content.components(separatedBy: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let entry = try? JSONDecoder().decode(HistoryEntry.self, from: data) else { continue }
+            if peaks[entry.r] == nil { order.append(entry.r) }
+            peaks[entry.r] = max(peaks[entry.r] ?? 0, entry.s)
+        }
+        return order.suffix(n).compactMap { peaks[$0] }
+    }
+
+    func sparkline(_ peaks: [Int]) -> String {
+        let blocks = ["▁","▂","▃","▄","▅","▆","▇","█"]
+        return peaks.map { pct -> String in
+            let idx = max(0, min(7, pct * 8 / 100))
+            return blocks[idx]
+        }.joined()
     }
 
     // MARK: - Model Info
@@ -459,6 +521,7 @@ print(max(c, key=c.get) if c else '')
             for w in u.weekly {
                 addUsageRow(to: menu, label: w.label, pct: w.pct, resetsAt: w.resetsAt)
             }
+            addHistoryRow(to: menu)
             menu.addItem(.separator())
         }
 
@@ -540,6 +603,25 @@ print(max(c, key=c.get) if c else '')
             sub.isEnabled = false
             menu.addItem(sub)
         }
+    }
+
+    func addHistoryRow(to menu: NSMenu) {
+        let peaks = loadSessionPeaks(last: 10)
+        guard peaks.count >= 2 else { return }
+        let spark = sparkline(peaks)
+        let item = NSMenuItem()
+        let attr = NSMutableAttributedString()
+        attr.append(NSAttributedString(string: "  \(spark) ", attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+            .foregroundColor: adaptiveColor(dark: 0.65, light: 0.45)
+        ]))
+        attr.append(NSAttributedString(string: "過去\(peaks.count)セッション", attributes: [
+            .font: NSFont.systemFont(ofSize: 10),
+            .foregroundColor: adaptiveColor(dark: 0.72, light: 0.32)
+        ]))
+        item.attributedTitle = attr
+        item.isEnabled = false
+        menu.addItem(item)
     }
 
     func addModelRow(to menu: NSMenu) {
