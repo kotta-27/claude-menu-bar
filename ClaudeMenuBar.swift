@@ -12,29 +12,39 @@ struct Session: Decodable {
     let status: String?
 }
 
-struct RateLimit: Decodable {
-    let utilization: Double?
+struct LimitScope: Decodable {
+    struct ModelInfo: Decodable {
+        let displayName: String?
+        enum CodingKeys: String, CodingKey { case displayName = "display_name" }
+    }
+    let model: ModelInfo?
+}
+
+struct Limit: Decodable {
+    let kind: String
+    let group: String
+    let percent: Int
     let resetsAt: String?
+    let scope: LimitScope?
     enum CodingKeys: String, CodingKey {
-        case utilization
+        case kind, group, percent, scope
         case resetsAt = "resets_at"
     }
 }
 
 struct UsageResponse: Decodable {
-    let fiveHour: RateLimit?
-    let sevenDay: RateLimit?
-    enum CodingKeys: String, CodingKey {
-        case fiveHour = "five_hour"
-        case sevenDay = "seven_day"
-    }
+    let limits: [Limit]
+}
+
+struct UsageEntry {
+    let label: String
+    let pct: Int
+    let resetsAt: Date?
 }
 
 struct UsageData {
-    let sessionPct: Int
-    let weeklyPct: Int
-    let sessionResetsAt: Date?
-    let weeklyResetsAt: Date?
+    let session: UsageEntry
+    let weekly: [UsageEntry]
 }
 
 struct ModelInfo {
@@ -86,14 +96,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                       let resp = try? JSONDecoder().decode(UsageResponse.self, from: data) else { return }
                 let iso = ISO8601DateFormatter()
                 iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                let parsed = UsageData(
-                    sessionPct:      Int(resp.fiveHour?.utilization ?? 0),
-                    weeklyPct:       Int(resp.sevenDay?.utilization  ?? 0),
-                    sessionResetsAt: resp.fiveHour?.resetsAt.flatMap { iso.date(from: $0) },
-                    weeklyResetsAt:  resp.sevenDay?.resetsAt.flatMap  { iso.date(from: $0) }
+                func date(_ s: String?) -> Date? { s.flatMap { iso.date(from: $0) } }
+
+                let sessionLimit = resp.limits.first { $0.group == "session" }
+                let weeklyLimits = resp.limits.filter { $0.group == "weekly" }
+
+                let session = UsageEntry(
+                    label:    "5h セッション",
+                    pct:      sessionLimit?.percent ?? 0,
+                    resetsAt: date(sessionLimit?.resetsAt)
                 )
+                let weekly = weeklyLimits.map { l -> UsageEntry in
+                    let name = l.scope?.model?.displayName ?? "週間"
+                    let label = name == "週間" ? "週間" : "週間 \(name)"
+                    return UsageEntry(label: label, pct: l.percent, resetsAt: date(l.resetsAt))
+                }
+                let parsed = UsageData(session: session, weekly: weekly)
                 DispatchQueue.main.async {
-                    self?.checkUsageThresholds(newPct: parsed.sessionPct)
+                    self?.checkUsageThresholds(newPct: parsed.session.pct)
                     self?.usage = parsed
                     self?.refresh()
                 }
@@ -290,7 +310,7 @@ print(max(c, key=c.get) if c else '')
 
     func checkUsageThresholds(newPct: Int) {
         for t in notifyThresholds where previousSessionPct < t && newPct >= t {
-            let resetStr = usage?.sessionResetsAt.map { "（\(formatTimeUntil($0))）" } ?? ""
+            let resetStr = usage?.session.resetsAt.map { "（\(formatTimeUntil($0))）" } ?? ""
             notify(title: "Claude Code 使用量 \(t)% 超過",
                    body: "5時間セッション: \(newPct)% 使用済み\(resetStr)")
         }
@@ -412,7 +432,8 @@ print(max(c, key=c.get) if c else '')
     func updateIcon(sessions: [Session]) {
         guard let btn = statusItem.button else { return }
         if let u = usage {
-            let icon = makeDonutIcon(sessionPct: u.sessionPct, weeklyPct: u.weeklyPct)
+            let weeklyPct = u.weekly.first { !$0.label.contains(" ") || $0.label == "週間" }?.pct ?? u.weekly.first?.pct ?? 0
+            let icon = makeDonutIcon(sessionPct: u.session.pct, weeklyPct: weeklyPct)
             btn.image = icon
             btn.imagePosition = .imageOnly
             btn.title = ""
@@ -434,8 +455,10 @@ print(max(c, key=c.get) if c else '')
         // Usage
         if let u = usage {
             addHeader(to: menu, text: "Usage")
-            addUsageRow(to: menu, label: "5h セッション", pct: u.sessionPct, resetsAt: u.sessionResetsAt)
-            addUsageRow(to: menu, label: "週間",          pct: u.weeklyPct,  resetsAt: u.weeklyResetsAt)
+            addUsageRow(to: menu, label: u.session.label, pct: u.session.pct, resetsAt: u.session.resetsAt)
+            for w in u.weekly {
+                addUsageRow(to: menu, label: w.label, pct: w.pct, resetsAt: w.resetsAt)
+            }
             menu.addItem(.separator())
         }
 
