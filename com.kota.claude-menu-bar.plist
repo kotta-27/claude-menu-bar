@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.kota.claude-menu-bar</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/kota/Development/03_Personal/claude-menu-bar/ClaudeMenuBar.app/Contents/MacOS/ClaudeMenuBar</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/claude-menu-bar.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/claude-menu-bar.err</string>
+</dict>
+</plist>
